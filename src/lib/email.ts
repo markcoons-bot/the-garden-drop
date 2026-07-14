@@ -1,0 +1,773 @@
+/**
+ * EMAIL — the mailer and the templates.
+ *
+ * Two modes, exactly like the data layer:
+ *
+ *   • no RESEND_API_KEY → the message is printed to the terminal. Nothing is
+ *     sent, nothing is charged, and you can read the mail you just triggered
+ *     without configuring anything. This is the correct local default.
+ *   • RESEND_API_KEY set → the message goes out through Resend, from
+ *     RESEND_FROM, replying to RESEND_REPLY_TO.
+ *
+ * The issue template below is the newsletter. It is deliberately written as an
+ * old-fashioned table-based HTML email — no flexbox, no grid, no background
+ * images, inline styles — because a meaningful share of gardening readers open
+ * mail in Outlook, and an email that only renders in Gmail is a broken email.
+ */
+
+import 'server-only';
+import { Resend } from 'resend';
+import siteConfig from '~/site.config';
+import type { Issue, Plant, Story, Subscriber, Technique, Verdict } from './types';
+import { VERDICT_BLURB, VERDICT_LABEL } from './types';
+
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+
+export interface SendEmailInput {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+}
+
+export interface SendEmailResult {
+  ok: boolean;
+  /** false when we only logged it (no RESEND_API_KEY). */
+  delivered: boolean;
+  id?: string;
+  error?: string;
+}
+
+const RESEND_KEY = process.env.RESEND_API_KEY ?? '';
+const FROM = process.env.RESEND_FROM || `${siteConfig.name} <hello@thegardendrop.com>`;
+const REPLY_TO = process.env.RESEND_REPLY_TO || siteConfig.email.hello;
+
+export const mailer: 'resend' | 'console' = RESEND_KEY ? 'resend' : 'console';
+
+let client: Resend | null = null;
+function resend(): Resend {
+  if (!client) client = new Resend(RESEND_KEY);
+  return client;
+}
+
+export async function sendEmail({ to, subject, html, text }: SendEmailInput): Promise<SendEmailResult> {
+  if (!RESEND_KEY) {
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 400);
+    console.info(
+      [
+        '',
+        '┌─ EMAIL (not sent — RESEND_API_KEY is unset) ────────────────────────',
+        `│ To:      ${to}`,
+        `│ From:    ${FROM}`,
+        `│ Subject: ${subject}`,
+        '│',
+        `│ ${preview}${text.length > 400 ? '…' : ''}`,
+        '└─────────────────────────────────────────────────────────────────────',
+        '',
+      ].join('\n'),
+    );
+    return { ok: true, delivered: false };
+  }
+
+  try {
+    const { data, error } = await resend().emails.send({
+      from: FROM,
+      to: [to],
+      replyTo: REPLY_TO,
+      subject,
+      html,
+      text,
+    });
+    if (error) return { ok: false, delivered: false, error: error.message };
+    return { ok: true, delivered: true, id: data?.id };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown mail transport error.';
+    return { ok: false, delivered: false, error: message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared bits
+// ---------------------------------------------------------------------------
+
+export interface EmailTemplate {
+  subject: string;
+  html: string;
+  text: string;
+}
+
+const PAPER = '#FBF8F3';
+const PAPER_WARM = '#F4EEE4';
+const PAPER_DEEP = '#EBE3D6';
+const INK = '#191C17';
+const INK_SOFT = '#4E534A';
+const INK_FAINT = '#8A8D84';
+const CLAY = '#B4522E';
+const MOSS = '#2C4433';
+const RULE = '#DDD5C7';
+
+const VERDICT_COLOR: Record<Verdict, string> = {
+  buy: '#2C4433',
+  watch: '#B4842E',
+  wait: '#8A8D84',
+  skip: '#9E3B24',
+};
+
+const SERIF = "Georgia, 'Times New Roman', Times, serif";
+const SANS =
+  "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+const MONO = "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace";
+
+const BASE = siteConfig.url.replace(/\/$/, '');
+
+/** Every link in an email must be absolute. This is the only way to build one. */
+export function url(path: string): string {
+  return `${BASE}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+export function esc(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** **bold** / *italic* → inline tags. Same tiny grammar the site uses. */
+function inline(text: string): string {
+  return esc(text)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong style="font-weight:700;">$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+}
+
+function paragraphs(body: string, color = INK_SOFT, size = '16px'): string {
+  return body
+    .trim()
+    .split(/\n{2,}/)
+    .map(
+      (block) =>
+        `<p style="margin:0 0 16px 0;font-family:${SANS};font-size:${size};line-height:1.65;color:${color};">${inline(
+          block.trim(),
+        )}</p>`,
+    )
+    .join('');
+}
+
+function formatDate(iso: string): string {
+  // Publish dates are plain calendar dates ("2026-07-09"). Parsing those as a
+  // bare Date treats them as UTC midnight, which renders as the PREVIOUS day
+  // for anyone west of Greenwich — so an issue dated the 9th arrives stamped
+  // the 8th. Pin to midday UTC and format in UTC.
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T12:00:00Z` : iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-US', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/** A hairline. Tables, not <hr>, because Outlook renders <hr> unpredictably. */
+function rule(color = RULE, top = 0, bottom = 0): string {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:${top}px 0 ${bottom}px 0;"><tr><td height="1" style="height:1px;line-height:1px;font-size:0;background-color:${color};">&nbsp;</td></tr></table>`;
+}
+
+function kicker(text: string, color = CLAY): string {
+  return `<p style="margin:0 0 10px 0;font-family:${MONO};font-size:11px;line-height:1.3;letter-spacing:0.14em;text-transform:uppercase;color:${color};">${esc(
+    text,
+  )}</p>`;
+}
+
+function button(label: string, href: string, bg = INK, fg = PAPER): string {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 0 0;"><tr><td bgcolor="${bg}" style="background-color:${bg};padding:14px 26px;"><a href="${esc(
+    href,
+  )}" style="font-family:${MONO};font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:${fg};text-decoration:none;display:inline-block;">${esc(
+    label,
+  )}</a></td></tr></table>`;
+}
+
+function verdictChip(verdict: Verdict, line?: string): string {
+  const color = VERDICT_COLOR[verdict];
+  const tail = line
+    ? `<span style="font-family:${SANS};font-size:15px;line-height:1.55;color:${INK};"> ${inline(line)}</span>`
+    : '';
+  return `<p style="margin:14px 0 0 0;">
+    <span style="font-family:${MONO};font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:${color};border:1px solid ${color};padding:4px 8px;display:inline-block;margin-right:8px;">${esc(
+      VERDICT_LABEL[verdict],
+    )}</span>${tail}
+  </p>`;
+}
+
+/**
+ * The document wrapper. The only <style> block in the whole email is the media
+ * query below — everything else is inline, because Gmail strips <style> in some
+ * clipped contexts and Outlook ignores most of it anyway.
+ */
+function emailDocument({
+  title,
+  preheader,
+  body,
+}: {
+  title: string;
+  preheader: string;
+  body: string;
+}): string {
+  return `<!doctype html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>${esc(title)}</title>
+<!--[if mso]>
+<xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
+<![endif]-->
+<style>
+  @media only screen and (max-width: 620px) {
+    .gd-shell { width: 100% !important; }
+    .gd-pad { padding-left: 22px !important; padding-right: 22px !important; }
+    .gd-h1 { font-size: 30px !important; line-height: 1.12 !important; }
+    .gd-h2 { font-size: 22px !important; }
+    .gd-stack { display: block !important; width: 100% !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:${PAPER};">
+<div style="display:none;font-size:1px;color:${PAPER};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${esc(
+    preheader,
+  )}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${PAPER}" style="background-color:${PAPER};">
+  <tr>
+    <td align="center" style="padding:24px 12px 48px 12px;">
+      <table role="presentation" class="gd-shell" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:${PAPER};">
+        ${body}
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>`;
+}
+
+function masthead(): string {
+  return `<tr>
+    <td class="gd-pad" align="left" style="padding:8px 40px 20px 40px;">
+      <a href="${esc(url('/'))}" style="text-decoration:none;">
+        <span style="font-family:${SERIF};font-size:22px;color:${INK};">${esc(
+          siteConfig.nameParts.lead,
+        )} <em style="color:${CLAY};">${esc(siteConfig.nameParts.accent)}</em></span>
+      </a>
+    </td>
+  </tr>
+  <tr><td class="gd-pad" style="padding:0 40px;">${rule()}</td></tr>`;
+}
+
+function footer(unsubscribeUrl: string): string {
+  return `<tr>
+    <td class="gd-pad" style="padding:36px 40px 0 40px;">${rule()}</td>
+  </tr>
+  <tr>
+    <td class="gd-pad" align="left" style="padding:20px 40px 0 40px;">
+      <p style="margin:0 0 10px 0;font-family:${SERIF};font-size:16px;line-height:1.5;color:${INK};">${esc(
+        siteConfig.name,
+      )} — ${esc(siteConfig.tagline)}</p>
+      <p style="margin:0 0 14px 0;font-family:${SANS};font-size:13px;line-height:1.6;color:${INK_FAINT};">
+        ${esc(siteConfig.newsletter.consent)}
+      </p>
+      <p style="margin:0;font-family:${MONO};font-size:11px;line-height:1.7;letter-spacing:0.08em;text-transform:uppercase;color:${INK_FAINT};">
+        <a href="${esc(url('/issues'))}" style="color:${INK_FAINT};text-decoration:underline;">Archive</a>
+        &nbsp;·&nbsp;
+        <a href="${esc(url('/about'))}" style="color:${INK_FAINT};text-decoration:underline;">About</a>
+        &nbsp;·&nbsp;
+        <a href="${esc(url('/submit'))}" style="color:${INK_FAINT};text-decoration:underline;">Submit</a>
+        &nbsp;·&nbsp;
+        <a href="${esc(unsubscribeUrl)}" style="color:${INK_FAINT};text-decoration:underline;">Unsubscribe</a>
+      </p>
+    </td>
+  </tr>`;
+}
+
+// ---------------------------------------------------------------------------
+// Welcome
+// ---------------------------------------------------------------------------
+
+const WELCOME_SUBJECT = 'Welcome to The Garden Drop — and how to read a verdict';
+
+export function welcomeEmail(subscriber: Subscriber): EmailTemplate {
+  const unsubscribeUrl = url(`/unsubscribe?email=${encodeURIComponent(subscriber.email)}`);
+
+  const body = `<tr>
+    <td class="gd-pad" align="left" style="padding:32px 40px 0 40px;">
+      ${kicker('Welcome')}
+      <h1 class="gd-h1" style="margin:0 0 18px 0;font-family:${SERIF};font-size:34px;line-height:1.1;font-weight:400;color:${INK};">You are on the list.</h1>
+
+      <p style="margin:0 0 16px 0;font-family:${SANS};font-size:17px;line-height:1.65;color:${INK};">
+        ${esc(siteConfig.cadence)}, we send one email. It covers plants that were genuinely released
+        this season — not repackaged, not renamed, actually new — and techniques that are being sold
+        to gardeners faster than they are being tested on them. Every claim we print is traced to a
+        source, and where the source does not exist, we say so rather than guess.
+      </p>
+
+      <h2 class="gd-h2" style="margin:28px 0 12px 0;font-family:${SERIF};font-size:22px;line-height:1.2;font-weight:400;color:${INK};">How to read a Garden Drop verdict</h2>
+      <p style="margin:0 0 16px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK_SOFT};">
+        There are four, and they are about your money and your season, not our enthusiasm.
+      </p>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        ${(['buy', 'watch', 'wait', 'skip'] as Verdict[])
+          .map(
+            (v) => `<tr>
+              <td style="padding:0 0 12px 0;font-family:${SANS};font-size:16px;line-height:1.6;color:${INK_SOFT};">
+                <span style="font-family:${MONO};font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:${VERDICT_COLOR[v]};border:1px solid ${VERDICT_COLOR[v]};padding:3px 7px;">${esc(
+                  VERDICT_LABEL[v],
+                )}</span>
+                &nbsp; ${esc(VERDICT_BLURB[v])}
+              </td>
+            </tr>`,
+          )
+          .join('')}
+      </table>
+
+      <p style="margin:20px 0 16px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK};">
+        And one habit that matters more than the four labels: with every verdict, we publish the test
+        that would change our mind. If a breeder claims a hydrangea does not flop in rain, we say what
+        we would measure, and when. A verdict you cannot argue with is not a verdict — it is an
+        advertisement.
+      </p>
+
+      <p style="margin:0 0 24px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK};">
+        Read the current issue while you wait for the next one.
+      </p>
+
+      ${button('Read the latest issue', url('/issues'))}
+
+      <p style="margin:28px 0 0 0;font-family:${SERIF};font-size:17px;line-height:1.5;color:${INK};">
+        — The Garden Drop
+      </p>
+    </td>
+  </tr>`;
+
+  const html = emailDocument({
+    title: WELCOME_SUBJECT,
+    preheader:
+      'Four verdicts, one habit: we always publish the test that would change our mind.',
+    body: `${masthead()}${body}${footer(unsubscribeUrl)}`,
+  });
+
+  const text = [
+    'THE GARDEN DROP',
+    '',
+    'You are on the list.',
+    '',
+    `${siteConfig.cadence}, we send one email. It covers plants that were genuinely released this season — not repackaged, not renamed, actually new — and techniques that are being sold to gardeners faster than they are being tested on them. Every claim we print is traced to a source, and where the source does not exist, we say so rather than guess.`,
+    '',
+    'HOW TO READ A GARDEN DROP VERDICT',
+    ...(['buy', 'watch', 'wait', 'skip'] as Verdict[]).map(
+      (v) => `  ${VERDICT_LABEL[v]} — ${VERDICT_BLURB[v]}`,
+    ),
+    '',
+    'And one habit that matters more than the four labels: with every verdict, we publish the test that would change our mind. A verdict you cannot argue with is not a verdict — it is an advertisement.',
+    '',
+    `Read the latest issue: ${url('/issues')}`,
+    '',
+    '— The Garden Drop',
+    '',
+    `Unsubscribe: ${unsubscribeUrl}`,
+  ].join('\n');
+
+  return { subject: WELCOME_SUBJECT, html, text };
+}
+
+// ---------------------------------------------------------------------------
+// Submission acknowledgement
+// ---------------------------------------------------------------------------
+
+export function submissionAckEmail(input: {
+  submitterName: string;
+  subjectName: string;
+}): EmailTemplate {
+  const subject = `We have your submission: ${input.subjectName}`;
+
+  const text = [
+    `Hello ${input.submitterName},`,
+    '',
+    `Thank you — "${input.subjectName}" is now in the queue for The Garden Drop.`,
+    '',
+    'What happens next: a human reads it. If we can trace the claim to a primary source — a breeder page, a trial, a paper — it goes on the shortlist for an issue. If we cannot, we will usually write back and ask you where the number came from. That is not scepticism about you; it is the same question we ask everyone, including ourselves.',
+    '',
+    'We do not accept payment for coverage, so we cannot promise you an appearance. What we can promise is that if we do cover it, we will say plainly what is new about it, what is not, and what we would need to see before we would recommend it.',
+    '',
+    `Read how we rate things: ${url('/about#method')}`,
+    '',
+    '— The Garden Drop',
+    siteConfig.email.editorial,
+  ].join('\n');
+
+  const body = `<tr>
+    <td class="gd-pad" align="left" style="padding:32px 40px 0 40px;">
+      ${kicker('Submission received')}
+      <h1 class="gd-h1" style="margin:0 0 18px 0;font-family:${SERIF};font-size:30px;line-height:1.12;font-weight:400;color:${INK};">Thank you — it is in the queue.</h1>
+      <p style="margin:0 0 16px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK};">Hello ${esc(
+        input.submitterName,
+      )},</p>
+      <p style="margin:0 0 16px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK_SOFT};">
+        “${esc(input.subjectName)}” is now with our editors. A human reads every submission. If we can
+        trace the claim to a primary source — a breeder page, a trial, a paper — it goes on the
+        shortlist for an issue. If we cannot, we will usually write back and ask you where the number
+        came from. That is not scepticism about you; it is the same question we ask everyone,
+        including ourselves.
+      </p>
+      <p style="margin:0 0 24px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK_SOFT};">
+        We take no payment for coverage, so we cannot promise you an appearance. We can promise that
+        if we do cover it, we will say plainly what is new about it, what is not, and what we would
+        need to see before we would recommend it.
+      </p>
+      ${button('How we rate things', url('/about#method'))}
+      <p style="margin:28px 0 0 0;font-family:${SERIF};font-size:17px;line-height:1.5;color:${INK};">— The Garden Drop</p>
+    </td>
+  </tr>`;
+
+  const html = emailDocument({
+    title: subject,
+    preheader: 'A human reads every submission. Here is what happens next.',
+    body: `${masthead()}${body}${footer(url('/about#contact'))}`,
+  });
+
+  return { subject, html, text };
+}
+
+// ---------------------------------------------------------------------------
+// The issue
+// ---------------------------------------------------------------------------
+
+export interface IssueEmailContext {
+  plants: Plant[];
+  techniques: Technique[];
+  /** The lead story, when you have it. Falls back to the issue standfirst. */
+  story?: Story;
+  /** Resend broadcasts should pass {{{RESEND_UNSUBSCRIBE_URL}}} here. */
+  unsubscribeUrl?: string;
+}
+
+export function issueSubject(issue: Issue): string {
+  return `Issue ${String(issue.number).padStart(2, '0')} — ${issue.title}`;
+}
+
+export function issueEmail(issue: Issue, ctx: IssueEmailContext): EmailTemplate {
+  const subject = issueSubject(issue);
+  const issueUrl = url(`/issues/${issue.slug}`);
+  const unsubscribeUrl = ctx.unsubscribeUrl ?? url('/unsubscribe');
+
+  const techniqueBySlug = new Map(ctx.techniques.map((t) => [t.slug, t]));
+  const plantBySlug = new Map(ctx.plants.map((p) => [p.slug, p]));
+  const lab = techniqueBySlug.get(issue.techniqueLab.techniqueSlug);
+
+  /** Only ever link to a page that exists — a 404 in a newsletter is unfixable. */
+  const linkFor = (card: { plantSlug?: string; techniqueSlug?: string }): string | null => {
+    if (card.plantSlug && plantBySlug.has(card.plantSlug)) return url(`/plants/${card.plantSlug}`);
+    if (card.techniqueSlug && techniqueBySlug.has(card.techniqueSlug)) {
+      return url(`/techniques/${card.techniqueSlug}`);
+    }
+    return null;
+  };
+
+  // --- The Drop -------------------------------------------------------------
+  const cards = issue.discoveries
+    .map((card, i) => {
+      const href = linkFor(card);
+      const more = href
+        ? `<p style="margin:14px 0 0 0;"><a href="${esc(
+            href,
+          )}" style="font-family:${MONO};font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:${CLAY};text-decoration:underline;">Read the full assessment →</a></p>`
+        : '';
+      return `<tr>
+        <td class="gd-pad" style="padding:0 40px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${PAPER_WARM}" style="background-color:${PAPER_WARM};border:1px solid ${RULE};margin:0 0 16px 0;">
+            <tr>
+              <td style="padding:24px 26px;">
+                <p style="margin:0 0 8px 0;font-family:${MONO};font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:${INK_FAINT};">
+                  ${String(i + 1).padStart(2, '0')} &nbsp;·&nbsp; ${esc(card.kicker)}
+                </p>
+                <h3 style="margin:0 0 10px 0;font-family:${SERIF};font-size:21px;line-height:1.2;font-weight:400;color:${INK};">${
+                  href
+                    ? `<a href="${esc(href)}" style="color:${INK};text-decoration:none;">${esc(card.title)}</a>`
+                    : esc(card.title)
+                }</h3>
+                <p style="margin:0;font-family:${SANS};font-size:15px;line-height:1.65;color:${INK_SOFT};">${inline(
+                  card.body,
+                )}</p>
+                ${card.verdict ? verdictChip(card.verdict, card.verdictLine) : ''}
+                ${more}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  // --- Technique Lab --------------------------------------------------------
+  const labSection = `<tr>
+    <td class="gd-pad" style="padding:36px 40px 0 40px;">
+      ${rule()}
+    </td>
+  </tr>
+  <tr>
+    <td class="gd-pad" align="left" style="padding:24px 40px 0 40px;">
+      ${kicker('The Technique Lab')}
+      <h2 class="gd-h2" style="margin:0 0 12px 0;font-family:${SERIF};font-size:25px;line-height:1.15;font-weight:400;color:${INK};">${esc(
+        lab ? lab.name : issue.techniqueLab.techniqueSlug,
+      )}</h2>
+      ${paragraphs(issue.techniqueLab.framing, INK_SOFT)}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${PAPER_DEEP}" style="background-color:${PAPER_DEEP};border-left:2px solid ${CLAY};">
+        <tr>
+          <td style="padding:20px 22px;">
+            <p style="margin:0 0 8px 0;font-family:${MONO};font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:${CLAY};">The test</p>
+            <p style="margin:0;font-family:${SANS};font-size:15px;line-height:1.65;color:${INK};">${inline(
+              issue.techniqueLab.theTest,
+            )}</p>
+          </td>
+        </tr>
+      </table>
+      ${
+        lab
+          ? `<p style="margin:14px 0 0 0;"><a href="${esc(
+              url(`/techniques/${lab.slug}`),
+            )}" style="font-family:${MONO};font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:${CLAY};text-decoration:underline;">The full technique assessment →</a></p>`
+          : ''
+      }
+    </td>
+  </tr>`;
+
+  // --- Worth it? ------------------------------------------------------------
+  const worthIt = issue.worthIt;
+  const worthItHref = worthIt.subjectHref ? url(worthIt.subjectHref) : issueUrl;
+  const worthItSection = `<tr>
+    <td class="gd-pad" style="padding:36px 40px 0 40px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${MOSS}" style="background-color:${MOSS};">
+        <tr>
+          <td style="padding:28px 26px;">
+            <p style="margin:0 0 10px 0;font-family:${MONO};font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:#B9C9BC;">Worth it?</p>
+            <p style="margin:0 0 6px 0;font-family:${MONO};font-size:12px;letter-spacing:0.06em;color:#B9C9BC;">${esc(
+              worthIt.subject,
+            )}</p>
+            <h2 class="gd-h2" style="margin:0 0 10px 0;font-family:${SERIF};font-size:24px;line-height:1.2;font-weight:400;color:${PAPER};">${esc(
+              worthIt.line,
+            )}</h2>
+            <p style="margin:0 0 14px 0;font-family:${MONO};font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#FFFFFF;background-color:${
+              VERDICT_COLOR[worthIt.verdict]
+            };display:inline-block;padding:5px 9px;">${esc(VERDICT_LABEL[worthIt.verdict])}</p>
+            <p style="margin:0;font-family:${SANS};font-size:15px;line-height:1.65;color:#DCE3DC;">${inline(
+              worthIt.body,
+            )}</p>
+            ${button('See the full verdict', worthItHref, PAPER, INK)}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>`;
+
+  // --- Reader action --------------------------------------------------------
+  const action = issue.readerAction;
+  const actionSection = `<tr>
+    <td class="gd-pad" style="padding:36px 40px 0 40px;">${rule()}</td>
+  </tr>
+  <tr>
+    <td class="gd-pad" align="left" style="padding:24px 40px 0 40px;">
+      ${kicker('Do this, this fortnight')}
+      <h2 class="gd-h2" style="margin:0 0 12px 0;font-family:${SERIF};font-size:25px;line-height:1.15;font-weight:400;color:${INK};">${esc(
+        action.heading,
+      )}</h2>
+      ${paragraphs(action.intro, INK_SOFT)}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        ${action.steps
+          .map(
+            (step, i) => `<tr>
+              <td width="34" valign="top" style="width:34px;padding:0 0 12px 0;font-family:${MONO};font-size:12px;line-height:1.6;color:${CLAY};">${String(
+                i + 1,
+              ).padStart(2, '0')}</td>
+              <td valign="top" style="padding:0 0 12px 0;font-family:${SANS};font-size:15px;line-height:1.6;color:${INK};">${inline(
+                step,
+              )}</td>
+            </tr>`,
+          )
+          .join('')}
+      </table>
+      ${
+        action.askBack
+          ? `<p style="margin:12px 0 0 0;font-family:${SANS};font-size:14px;line-height:1.65;color:${INK_FAINT};font-style:italic;">${inline(
+              action.askBack,
+            )}</p>`
+          : ''
+      }
+    </td>
+  </tr>`;
+
+  // --- Head of the letter ---------------------------------------------------
+  const story = ctx.story;
+  const head = `<tr>
+    <td class="gd-pad" align="left" style="padding:28px 40px 0 40px;">
+      <p style="margin:0 0 18px 0;font-family:${MONO};font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:${INK_FAINT};">
+        Issue ${esc(String(issue.number).padStart(2, '0'))} &nbsp;·&nbsp; ${esc(
+          formatDate(issue.publishDate),
+        )} &nbsp;·&nbsp; ${esc(siteConfig.cadenceShort)}
+      </p>
+      <h1 class="gd-h1" style="margin:0 0 14px 0;font-family:${SERIF};font-size:36px;line-height:1.08;font-weight:400;color:${INK};">
+        <a href="${esc(issueUrl)}" style="color:${INK};text-decoration:none;">${esc(issue.title)}</a>
+      </h1>
+      <p style="margin:0 0 22px 0;font-family:${SERIF};font-size:19px;line-height:1.45;color:${INK_SOFT};">${esc(
+        issue.standfirst,
+      )}</p>
+    </td>
+  </tr>
+  <tr>
+    <td class="gd-pad" style="padding:0 40px;">${rule()}</td>
+  </tr>
+  <tr>
+    <td class="gd-pad" align="left" style="padding:24px 40px 0 40px;">
+      ${kicker("Editor's note")}
+      ${paragraphs(issue.editorsIntro, INK)}
+    </td>
+  </tr>`;
+
+  const leadSection = `<tr>
+    <td class="gd-pad" style="padding:20px 40px 0 40px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:2px solid ${INK};border-bottom:1px solid ${RULE};">
+        <tr>
+          <td style="padding:22px 0;">
+            ${kicker('The lead story')}
+            <h2 class="gd-h2" style="margin:0 0 10px 0;font-family:${SERIF};font-size:26px;line-height:1.15;font-weight:400;color:${INK};">${esc(
+              story ? story.title : issue.title,
+            )}</h2>
+            <p style="margin:0 0 4px 0;font-family:${SANS};font-size:16px;line-height:1.65;color:${INK_SOFT};">${esc(
+              story ? story.standfirst : issue.standfirst,
+            )}</p>
+            ${button('Read the full issue', issueUrl)}
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>`;
+
+  const dropHeader = `<tr>
+    <td class="gd-pad" align="left" style="padding:32px 40px 16px 40px;">
+      ${kicker('The Drop')}
+      <h2 class="gd-h2" style="margin:0;font-family:${SERIF};font-size:25px;line-height:1.15;font-weight:400;color:${INK};">Five things worth knowing about</h2>
+    </td>
+  </tr>`;
+
+  const researchNote = issue.researchRequired.length
+    ? `<tr>
+        <td class="gd-pad" align="left" style="padding:28px 40px 0 40px;">
+          <p style="margin:0;font-family:${SANS};font-size:13px;line-height:1.65;color:${INK_FAINT};">
+            ${esc(String(issue.researchRequired.length))} item${
+              issue.researchRequired.length === 1 ? ' is' : 's are'
+            } still marked
+            <a href="${esc(issueUrl)}" style="color:${CLAY};text-decoration:underline;">“${esc(
+              siteConfig.policy.researchRequired.toLowerCase(),
+            )}”</a>
+            in this issue. We print that list rather than quietly filling the gaps.
+          </p>
+        </td>
+      </tr>`
+    : '';
+
+  const html = emailDocument({
+    title: subject,
+    preheader: issue.standfirst,
+    body: [
+      masthead(),
+      head,
+      leadSection,
+      dropHeader,
+      cards,
+      labSection,
+      worthItSection,
+      actionSection,
+      researchNote,
+      footer(unsubscribeUrl),
+    ].join(''),
+  });
+
+  // --- Plain text -----------------------------------------------------------
+  const strip = (s: string) => s.replace(/\*\*/g, '').replace(/\*/g, '');
+  const text = [
+    'THE GARDEN DROP',
+    `Issue ${String(issue.number).padStart(2, '0')} · ${formatDate(issue.publishDate)}`,
+    '',
+    issue.title.toUpperCase(),
+    issue.standfirst,
+    '',
+    '---',
+    '',
+    "EDITOR'S NOTE",
+    strip(issue.editorsIntro),
+    '',
+    '---',
+    '',
+    'THE LEAD STORY',
+    story ? story.title : issue.title,
+    story ? story.standfirst : issue.standfirst,
+    `Read the full issue: ${issueUrl}`,
+    '',
+    '---',
+    '',
+    'THE DROP — five things worth knowing about',
+    '',
+    ...issue.discoveries.flatMap((card, i) => {
+      const href = linkFor(card);
+      return [
+        `${String(i + 1).padStart(2, '0')}. ${card.kicker}`,
+        card.title,
+        strip(card.body),
+        card.verdict
+          ? `VERDICT: ${VERDICT_LABEL[card.verdict]}${
+              card.verdictLine ? ` — ${strip(card.verdictLine)}` : ''
+            }`
+          : '',
+        href ? href : '',
+        '',
+      ].filter(Boolean);
+    }),
+    '---',
+    '',
+    `THE TECHNIQUE LAB — ${lab ? lab.name : issue.techniqueLab.techniqueSlug}`,
+    strip(issue.techniqueLab.framing),
+    '',
+    `THE TEST: ${strip(issue.techniqueLab.theTest)}`,
+    lab ? url(`/techniques/${lab.slug}`) : '',
+    '',
+    '---',
+    '',
+    `WORTH IT? — ${worthIt.subject}`,
+    `${VERDICT_LABEL[worthIt.verdict]}: ${worthIt.line}`,
+    strip(worthIt.body),
+    worthItHref,
+    '',
+    '---',
+    '',
+    `DO THIS, THIS FORTNIGHT — ${action.heading}`,
+    strip(action.intro),
+    '',
+    ...action.steps.map((s2, i) => `${String(i + 1).padStart(2, '0')}. ${strip(s2)}`),
+    action.askBack ? `\n${strip(action.askBack)}` : '',
+    '',
+    '---',
+    '',
+    siteConfig.newsletter.consent,
+    `Archive: ${url('/issues')}`,
+    `Unsubscribe: ${unsubscribeUrl}`,
+  ]
+    .join('\n')
+    // Never more than one blank line, whatever the optional fields did.
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return { subject, html, text };
+}

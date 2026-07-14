@@ -1,0 +1,37 @@
+{
+  "name": "the-garden-drop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Garden Drop — a discovery publication tracking newly released plants and emerging gardening techniques.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:seed:sql": "tsx scripts/generate-seed-sql.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.3",
+    "clsx": "^2.1.1",
+    "next": "15.5.20",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "resend": "^6.17.2",
+    "server-only": "^0.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.20",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "15.5.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.19",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
