@@ -33,8 +33,67 @@ export default function OpengraphImage() {
           justifyContent: 'space-between',
           backgroundColor: PAPER,
           padding: '72px 80px',
+          position: 'relative',
+          overflow: 'hidden',
         }}
       >
+        {/* Decorative flower — top-right corner */}
+        <div
+          style={{
+            display: 'flex',
+            position: 'absolute',
+            top: -30,
+            right: -30,
+            width: 320,
+            height: 320,
+            opacity: 0.12,
+          }}
+        >
+          <svg
+            viewBox="0 0 200 200"
+            width="320"
+            height="320"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            {/* Petals */}
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} />
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} transform="rotate(60 100 100)" />
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} transform="rotate(120 100 100)" />
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} transform="rotate(180 100 100)" />
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} transform="rotate(240 100 100)" />
+            <ellipse cx="100" cy="50" rx="28" ry="45" fill={CLAY} transform="rotate(300 100 100)" />
+            {/* Center */}
+            <circle cx="100" cy="100" r="18" fill={INK} />
+          </svg>
+        </div>
+
+        {/* Small flower — bottom-left */}
+        <div
+          style={{
+            display: 'flex',
+            position: 'absolute',
+            bottom: 40,
+            left: 40,
+            width: 120,
+            height: 120,
+            opacity: 0.08,
+          }}
+        >
+          <svg
+            viewBox="0 0 200 200"
+            width="120"
+            height="120"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <ellipse cx="100" cy="55" rx="24" ry="40" fill={INK_SOFT} />
+            <ellipse cx="100" cy="55" rx="24" ry="40" fill={INK_SOFT} transform="rotate(72 100 100)" />
+            <ellipse cx="100" cy="55" rx="24" ry="40" fill={INK_SOFT} transform="rotate(144 100 100)" />
+            <ellipse cx="100" cy="55" rx="24" ry="40" fill={INK_SOFT} transform="rotate(216 100 100)" />
+            <ellipse cx="100" cy="55" rx="24" ry="40" fill={INK_SOFT} transform="rotate(288 100 100)" />
+            <circle cx="100" cy="100" r="14" fill={CLAY} />
+          </svg>
+        </div>
+
         {/* Kicker row */}
         <div
           style={{
